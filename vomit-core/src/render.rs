@@ -1,8 +1,51 @@
-//! Turns the derived byte stream into a typeable passphrase.
+//! Turns an unlocked seed into a typeable passphrase.
+//!
+//! ```text
+//! block_i = HMAC-SHA256(seed, "vomit-enforcer/v1/out" || i:u32be)
+//! ```
+//! then rejection sampling into the charset, so there's no bias.
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use zeroize::Zeroize;
 
-use crate::kdf::OutputStream;
+use crate::seed::Seed;
+
+const OUT_DOMAIN: &[u8] = b"vomit-enforcer/v1/out";
+
+/// Endless pseudo-random byte stream keyed by a seed.
+pub struct OutputStream<'a> {
+    seed: &'a Seed,
+    counter: u32,
+    block: [u8; 32],
+    pos: usize,
+}
+
+impl<'a> OutputStream<'a> {
+    pub fn new(seed: &'a Seed) -> Self {
+        Self { seed, counter: 0, block: [0; 32], pos: 32 }
+    }
+
+    pub fn next_byte(&mut self) -> u8 {
+        if self.pos == self.block.len() {
+            let mut m = Hmac::<Sha256>::new_from_slice(self.seed.bytes()).unwrap();
+            m.update(OUT_DOMAIN);
+            m.update(&self.counter.to_be_bytes());
+            self.block = m.finalize().into_bytes().into();
+            self.counter += 1;
+            self.pos = 0;
+        }
+        let b = self.block[self.pos];
+        self.pos += 1;
+        b
+    }
+}
+
+impl Drop for OutputStream<'_> {
+    fn drop(&mut self) {
+        self.block.zeroize();
+    }
+}
 
 pub const MAX_LEN: usize = 64;
 
@@ -44,8 +87,6 @@ impl Charset {
 pub struct Format {
     pub charset: Charset,
     pub length: usize,
-    /// Press Enter after typing.
-    pub enter: bool,
 }
 
 pub struct Passphrase {
@@ -67,7 +108,8 @@ impl Drop for Passphrase {
 
 /// Unbiased: bytes that would skew the distribution are thrown away
 /// (rejection sampling).
-pub fn render(stream: &mut OutputStream, format: &Format) -> Passphrase {
+pub fn render(seed: &Seed, format: &Format) -> Passphrase {
+    let mut stream = OutputStream::new(seed);
     let n = format.charset.len();
     assert!((2..=256).contains(&n));
     let len = format.length.min(MAX_LEN);
@@ -88,25 +130,34 @@ pub fn render(stream: &mut OutputStream, format: &Format) -> Passphrase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{entry::PinEntry, kdf::derive_pin_key, seed::Seed, InputEvent};
 
-    fn stream() -> OutputStream {
-        let mut e = PinEntry::new(128, 1);
-        e.handle(InputEvent::Insert(1));
-        OutputStream::new(derive_pin_key(&Seed::from_bytes([3; 32]), &e.take()))
+    fn fmt(charset: Charset, length: usize) -> Format {
+        Format { charset, length }
     }
 
     #[test]
     fn charsets() {
-        let p = render(&mut stream(), &Format { charset: Charset::Printable, length: 64, enter: false });
+        let seed = Seed::from_bytes([3; 32]);
+        let p = render(&seed, &fmt(Charset::Printable, 64));
         assert_eq!(p.as_bytes().len(), 64);
         assert!(p.as_bytes().iter().all(|c| (b'!'..=b'~').contains(c)));
 
-        let p = render(&mut stream(), &Format { charset: Charset::Hex, length: 10, enter: false });
+        let p = render(&seed, &fmt(Charset::Hex, 10));
         assert!(p.as_bytes().iter().all(|c| c.is_ascii_hexdigit()));
 
-        let p = render(&mut stream(), &Format { charset: Charset::Alnum, length: 100, enter: false });
+        let p = render(&seed, &fmt(Charset::Alnum, 100));
         assert_eq!(p.as_bytes().len(), MAX_LEN);
         assert!(p.as_bytes().iter().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn known_answer() {
+        // Pins the derivation so a refactor can't silently change every
+        // passphrase. First output block for an all-zero seed:
+        //   python3 -c 'import hmac,hashlib;print(hmac.new(bytes(32),b"vomit-enforcer/v1/out"+bytes(4),hashlib.sha256).hexdigest())'
+        let seed = Seed::from_bytes([0; 32]);
+        let mut s = OutputStream::new(&seed);
+        let hex: String = (0..32).map(|_| format!("{:02x}", s.next_byte())).collect();
+        assert_eq!(hex, "c4523e21fb589e3fa400656e8097928b5d08a837bf5b3b2df9d630e90addf619");
     }
 }
