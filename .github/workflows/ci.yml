@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+        working-directory: vomit-core
+
+  firmware:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["input-dial", "input-keypad"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - run: cargo build --release --no-default-features --features ${{ matrix.features }}
+        working-directory: firmware
