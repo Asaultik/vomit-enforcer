@@ -3,9 +3,11 @@
 Python `cryptography` package. Prints the known-answer vectors the Rust tests
 pin, so the two implementations check each other.
 
-    pip install cryptography
-    python3 tools/kat.py
+    pip install "cryptography>=44"
+    python3 tools/kat.py           # print the vectors
+    python3 tools/kat.py --check   # assert they match the ones the Rust tests pin
 """
+import sys
 import hmac
 import hashlib
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
@@ -48,10 +50,26 @@ def seal_slot(pin, salt, slot, ctr, seed, charset_id, length, blocks, passes) ->
     return ChaCha20Poly1305(k).encrypt(nonce, seed + bytes([charset_id, length]), aad)
 
 
+# The same values the Rust tests pin. Changing one side without the other fails CI.
+EXPECTED = {
+    "render printable 32": b"?*R+3r/dV%R!{k9e'1>WX-gK}\\lLh'<S",
+    "render hex 16": b"c918f2800b17cd15",
+    "argon2id": "3a51519ab8af15a8436ba94ce8f8fccede5ed1e037e814ee8f143a3dddf14203",
+    "slot 3 seal": "52b9a3cb9e2532b9cf49141b2ce462dc8af311f46f50b0ada83672888df07612cbb01ba8c9cc602acbdcca238f13b1a3a6b2",
+}
+
+
 if __name__ == "__main__":
-    print("render printable 32:", render(bytes(32), PRINTABLE, 32))
-    print("render hex 16:      ", render(bytes(32), HEX, 16))
-    print("argon2id [100,64,116] salt=01*16 m=8 t=1:", stretch([100, 64, 116], b"\x01" * 16, 8, 1).hex())
-    print(
-        "slot 3 seal:", seal_slot([5, 5], b"\x02" * 16, 3, 1, b"\x02" * 32, 2, 64, 8, 1).hex()
-    )
+    got = {
+        "render printable 32": render(bytes(32), PRINTABLE, 32),
+        "render hex 16": render(bytes(32), HEX, 16),
+        "argon2id": stretch([100, 64, 116], b"\x01" * 16, 8, 1).hex(),
+        "slot 3 seal": seal_slot([5, 5], b"\x02" * 16, 3, 1, b"\x02" * 32, 2, 64, 8, 1).hex(),
+    }
+    for name, value in got.items():
+        print(f"{name}: {value}")
+    if "--check" in sys.argv:
+        bad = [n for n in got if got[n] != EXPECTED[n]]
+        if bad:
+            sys.exit(f"MISMATCH: {', '.join(bad)}")
+        print("all vectors match")
