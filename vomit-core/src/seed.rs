@@ -29,7 +29,7 @@ impl Seed {
             return None;
         }
         let mut s = Seed([0; SEED_LEN]);
-        for (i, pair) in hex.chunks_exact(2).enumerate() {
+        for (i, pair) in hex.as_chunks::<2>().0.iter().enumerate() {
             s.0[i] = nibble(pair[0])? << 4 | nibble(pair[1])?;
         }
         Some(s)
