@@ -3,11 +3,13 @@ name = "vomit-core"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Crypto core for vomit-enforcer: PIN-locked seed vault with throttling and wipe, passphrase derivation."
+description = "Crypto core for vomit-enforcer: PIN-locked seed vault with throttling, wipe and key rotation, passphrase derivation."
 
 [dependencies]
-hmac = { version = "0.12", default-features = false }
+argon2 = { version = "0.5", default-features = false, features = ["zeroize"] }
+chacha20 = { version = "0.9", features = ["zeroize"] }
+chacha20poly1305 = { version = "0.10", default-features = false }
+hkdf = "0.12"
 sha2 = { version = "0.10", default-features = false }
-pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 subtle = { version = "2.6", default-features = false }
 zeroize = { version = "1.8", default-features = false, features = ["derive"] }

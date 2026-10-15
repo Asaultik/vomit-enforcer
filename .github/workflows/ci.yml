@@ -7,10 +7,23 @@ on:
 jobs:
   core:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vomit-core
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-        working-directory: vomit-core
-      - run: rustup target add thumbv7em-none-eabihf && cargo build --target thumbv7em-none-eabihf
-        working-directory: vomit-core
+      - run: cargo build --release --target thumbv7em-none-eabihf
+
+  reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install cryptography
+      - run: python3 tools/kat.py
