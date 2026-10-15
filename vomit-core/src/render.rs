@@ -1,55 +1,33 @@
 //! Turns an unlocked seed into a typeable passphrase.
 //!
 //! ```text
-//! block_i = HMAC-SHA256(seed, "vomit-enforcer/v1/out" || i:u32be)
+//! k      = HKDF-SHA256(ikm = seed, info = "vomit-enforcer/v1/passphrase")
+//! stream = ChaCha20(k, nonce = 0) keystream
 //! ```
 //! then rejection sampling into the charset, so there's no bias.
+//!
+//! Other outputs (raw keys, TOTP secrets, ...) should use their own HKDF label
+//! via [`derive_key`], never this stream.
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
+use chacha20::ChaCha20;
 use zeroize::Zeroize;
 
+use crate::kdf::hkdf32_parts;
 use crate::seed::Seed;
 
-const OUT_DOMAIN: &[u8] = b"vomit-enforcer/v1/out";
-
-/// Endless pseudo-random byte stream keyed by a seed.
-pub struct OutputStream<'a> {
-    seed: &'a Seed,
-    counter: u32,
-    block: [u8; 32],
-    pos: usize,
-}
-
-impl<'a> OutputStream<'a> {
-    pub fn new(seed: &'a Seed) -> Self {
-        Self { seed, counter: 0, block: [0; 32], pos: 32 }
-    }
-
-    pub fn next_byte(&mut self) -> u8 {
-        if self.pos == self.block.len() {
-            let mut m = Hmac::<Sha256>::new_from_slice(self.seed.bytes()).unwrap();
-            m.update(OUT_DOMAIN);
-            m.update(&self.counter.to_be_bytes());
-            self.block = m.finalize().into_bytes().into();
-            self.counter += 1;
-            self.pos = 0;
-        }
-        let b = self.block[self.pos];
-        self.pos += 1;
-        b
-    }
-}
-
-impl Drop for OutputStream<'_> {
-    fn drop(&mut self) {
-        self.block.zeroize();
-    }
-}
+const LABEL_PREFIX: &[u8] = b"vomit-enforcer/v1/";
+const PASSPHRASE: &[u8] = b"passphrase";
 
 pub const MAX_LEN: usize = 64;
 
-#[derive(Clone, Copy, Debug)]
+/// A 32 byte key for `purpose`, independent of the passphrase and of every
+/// other purpose.
+pub fn derive_key(seed: &Seed, purpose: &[u8]) -> zeroize::Zeroizing<[u8; 32]> {
+    hkdf32_parts(seed.bytes(), &[LABEL_PREFIX, purpose])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Charset {
     /// All 94 printable ASCII characters except space. ~6.55 bits/char.
     Printable,
@@ -57,7 +35,6 @@ pub enum Charset {
     Alnum,
     /// Lowercase hex. 4 bits/char. For things that want a raw key.
     Hex,
-    Custom(&'static [u8]),
 }
 
 const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -69,7 +46,6 @@ impl Charset {
             Charset::Printable => 94,
             Charset::Alnum => ALNUM.len(),
             Charset::Hex => HEX.len(),
-            Charset::Custom(c) => c.len(),
         }
     }
 
@@ -78,14 +54,14 @@ impl Charset {
             Charset::Printable => b'!' + i as u8,
             Charset::Alnum => ALNUM[i],
             Charset::Hex => HEX[i],
-            Charset::Custom(c) => c[i],
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Format {
     pub charset: Charset,
+    /// 1..=MAX_LEN characters.
     pub length: usize,
 }
 
@@ -106,24 +82,39 @@ impl Drop for Passphrase {
     }
 }
 
-/// Unbiased: bytes that would skew the distribution are thrown away
-/// (rejection sampling).
+impl core::fmt::Debug for Passphrase {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Passphrase({} chars)", self.len)
+    }
+}
+
 pub fn render(seed: &Seed, format: &Format) -> Passphrase {
-    let mut stream = OutputStream::new(seed);
+    let key = derive_key(seed, PASSPHRASE);
+    let mut cipher = ChaCha20::new((&*key).into(), &[0u8; 12].into());
+    drop(key);
+
     let n = format.charset.len();
-    assert!((2..=256).contains(&n));
     let len = format.length.min(MAX_LEN);
     let limit = 256 - 256 % n; // largest multiple of n that fits in a byte
     let mut out = Passphrase { len, buf: [0; MAX_LEN] };
+    let mut block = [0u8; 64];
+    let mut pos = block.len();
     for slot in out.buf[..len].iter_mut() {
         loop {
-            let b = stream.next_byte() as usize;
+            if pos == block.len() {
+                block = [0; 64];
+                cipher.apply_keystream(&mut block);
+                pos = 0;
+            }
+            let b = block[pos] as usize;
+            pos += 1;
             if b < limit {
                 *slot = format.charset.get(b % n);
                 break;
             }
         }
     }
+    block.zeroize();
     out
 }
 
@@ -151,13 +142,22 @@ mod tests {
     }
 
     #[test]
+    fn labels_are_independent() {
+        let seed = Seed::from_bytes([3; 32]);
+        assert_ne!(*derive_key(&seed, b"a"), *derive_key(&seed, b"b"));
+        assert_ne!(*derive_key(&seed, b"a"), *derive_key(&seed, PASSPHRASE));
+    }
+
+    #[test]
     fn known_answer() {
         // Pins the derivation so a refactor can't silently change every
-        // passphrase. First output block for an all-zero seed:
-        //   python3 -c 'import hmac,hashlib;print(hmac.new(bytes(32),b"vomit-enforcer/v1/out"+bytes(4),hashlib.sha256).hexdigest())'
-        let seed = Seed::from_bytes([0; 32]);
-        let mut s = OutputStream::new(&seed);
-        let hex: String = (0..32).map(|_| format!("{:02x}", s.next_byte())).collect();
-        assert_eq!(hex, "c4523e21fb589e3fa400656e8097928b5d08a837bf5b3b2df9d630e90addf619");
+        // passphrase. Generated with tools/kat.py (Python `cryptography`).
+        let p = render(&Seed::from_bytes([0; 32]), &fmt(Charset::Printable, 32));
+        assert_eq!(p.as_bytes(), KA_PRINTABLE);
+        let p = render(&Seed::from_bytes([0; 32]), &fmt(Charset::Hex, 16));
+        assert_eq!(p.as_bytes(), KA_HEX);
     }
+
+    const KA_PRINTABLE: &[u8] = br#"?*R+3r/dV%R!{k9e'1>WX-gK}\lLh'<S"#;
+    const KA_HEX: &[u8] = b"c918f2800b17cd15";
 }
