@@ -1,0 +1,29 @@
+[package]
+name = "vomit-bench"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Bench firmware: measures vomit-core's Argon2id and vault costs on a real STM32F411 and checks the RTC backup registers."
+publish = false
+
+[dependencies]
+vomit-core = { path = "../vomit-core" }
+
+embassy-stm32 = { version = "0.6", features = ["stm32f411ce", "time-driver-tim2", "memory-x", "unstable-pac", "defmt"] }
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
+cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7"
+defmt = "1"
+defmt-rtt = "1"
+panic-probe = { version = "1", features = ["print-defmt"] }
+
+# Timings only mean something with the optimiser on: always run with --release.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = 2
+
+[profile.dev]
+opt-level = 3
