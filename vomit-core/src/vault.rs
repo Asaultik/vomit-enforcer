@@ -70,12 +70,20 @@ pub struct Config {
     /// Lockout after the first wrong PIN. Doubles with each further one.
     pub base_delay_ms: u64,
     pub max_delay_ms: u64,
+    /// After a correct PIN, changing slots ([`Vault::store`], [`Vault::clear_slot`])
+    /// is allowed for this long. Outside it they return [`Error::Locked`].
+    pub admin_window_ms: u64,
     pub kdf: KdfParams,
 }
 
 impl Config {
-    pub const DEFAULT: Config =
-        Config { max_failures: 10, base_delay_ms: 1_000, max_delay_ms: 5 * 60_000, kdf: KdfParams { passes: 3 } };
+    pub const DEFAULT: Config = Config {
+        max_failures: 10,
+        base_delay_ms: 1_000,
+        max_delay_ms: 5 * 60_000,
+        admin_window_ms: 60_000,
+        kdf: KdfParams { passes: 3 },
+    };
 
     pub fn delay_after(&self, failures: u32) -> u64 {
         if failures == 0 {
@@ -99,6 +107,8 @@ pub enum Error {
     Kdf,
     /// Less than [`MIN_ENTROPY`] bytes given to [`Vault::init`].
     Entropy,
+    /// Slots exist and no correct PIN was entered within the admin window.
+    Locked,
 }
 
 #[derive(Debug)]
@@ -136,6 +146,8 @@ pub struct Status {
 pub struct Vault {
     /// Caller's clock (ms). Not secret.
     locked_until_ms: u64,
+    /// Slot changes allowed until then (caller's clock). 0 = closed.
+    admin_until_ms: u64,
     bufs: [[u8; INNER_LEN]; 2],
     tags: [[u8; TAG_LEN]; 2],
 }
@@ -199,7 +211,7 @@ fn format_from(b: &[u8]) -> Format {
 impl Vault {
     /// All zeros. Not usable until [`Vault::init`].
     pub const fn new() -> Self {
-        Self { locked_until_ms: 0, bufs: [[0; INNER_LEN]; 2], tags: [[0; TAG_LEN]; 2] }
+        Self { locked_until_ms: 0, admin_until_ms: 0, bufs: [[0; INNER_LEN]; 2], tags: [[0; TAG_LEN]; 2] }
     }
 
     // ---- outer layer -------------------------------------------------------
@@ -295,6 +307,7 @@ impl Vault {
         self.bufs.zeroize();
         self.tags.zeroize();
         self.locked_until_ms = 0;
+        self.admin_until_ms = 0;
     }
 
     /// Call once after every reset. Cleans up an interrupted rotation, checks
@@ -312,6 +325,8 @@ impl Vault {
             return false;
         }
         self.locked_until_ms = now_ms.saturating_add(cfg.delay_after(backup::failures(bkp)));
+        // A reset ends any admin window: the clock restarted anyway.
+        self.admin_until_ms = 0;
         true
     }
 
@@ -348,11 +363,23 @@ impl Vault {
 
     // ---- slots -------------------------------------------------------------
 
+    /// Changing slots needs a recent correct PIN, unless there is nothing to
+    /// protect yet. Without this, `store` would be an uncounted PIN oracle (its
+    /// duplicate-PIN check reveals whether a guess opens another slot) and
+    /// anyone with the cable could overwrite slots.
+    fn may_modify(&self, inner: &[u8; INNER_LEN], now_ms: u64) -> bool {
+        let empty = (0..SLOTS).all(|s| slot_rec(inner, s)[S_USED] == 0);
+        empty || now_ms < self.admin_until_ms
+    }
+
     /// Seal an uploaded seed into `slot` behind `pin`.
     ///
     /// `salt` should be fresh random bytes from the host. `memory` is Argon2
     /// scratch (1 KiB per block; more is slower to attack) and is used for
     /// every used slot, to make sure the PIN isn't already taken.
+    ///
+    /// Only allowed on an empty vault or within `cfg.admin_window_ms` of a
+    /// correct PIN; otherwise [`Error::Locked`], before any PIN is looked at.
     #[allow(clippy::too_many_arguments)]
     pub fn store(
         &mut self,
@@ -365,10 +392,14 @@ impl Vault {
         format: &Format,
         salt: [u8; SALT_LEN],
         entropy: &[u8],
+        now_ms: u64,
     ) -> Result<(), Error> {
         let mut inner = blank();
         if !self.open_into(bkp, &mut inner) {
             return Err(Error::Dead);
+        }
+        if !self.may_modify(&inner, now_ms) {
+            return Err(Error::Locked);
         }
         if memory.len() < MIN_BLOCKS {
             return Err(Error::Kdf);
@@ -409,10 +440,20 @@ impl Vault {
         Ok(())
     }
 
-    pub fn clear_slot(&mut self, bkp: &mut impl BackupStore, slot: usize, entropy: &[u8]) -> Result<(), Error> {
+    /// Same admin-window rule as [`Vault::store`].
+    pub fn clear_slot(
+        &mut self,
+        bkp: &mut impl BackupStore,
+        slot: usize,
+        entropy: &[u8],
+        now_ms: u64,
+    ) -> Result<(), Error> {
         let mut inner = blank();
         if !self.open_into(bkp, &mut inner) {
             return Err(Error::Dead);
+        }
+        if !self.may_modify(&inner, now_ms) {
+            return Err(Error::Locked);
         }
         if slot >= SLOTS {
             return Err(Error::BadSlot);
@@ -468,6 +509,7 @@ impl Vault {
             Some((slot, seed, format)) => {
                 backup::set_failures(bkp, 0);
                 self.locked_until_ms = 0;
+                self.admin_until_ms = now_ms.saturating_add(cfg.admin_window_ms);
                 Attempt::Unlocked { slot, seed, format }
             }
             None if failures >= cfg.max_failures => {
@@ -475,6 +517,8 @@ impl Vault {
                 Attempt::Wiped
             }
             None => {
+                // A wrong PIN closes any open admin window.
+                self.admin_until_ms = 0;
                 let delay = cfg.delay_after(failures);
                 self.locked_until_ms = now_ms.saturating_add(delay);
                 Attempt::Wrong { attempts_left: cfg.max_failures - failures, retry_in_ms: delay }
@@ -532,7 +576,13 @@ mod tests {
     use crate::backup::MemBackup;
 
     // Cheap KDF so the tests run fast.
-    const C: Config = Config { max_failures: 3, base_delay_ms: 1000, max_delay_ms: 3000, kdf: KdfParams { passes: 1 } };
+    const C: Config = Config {
+        max_failures: 3,
+        base_delay_ms: 1000,
+        max_delay_ms: 3000,
+        admin_window_ms: 60_000,
+        kdf: KdfParams { passes: 1 },
+    };
     const F: Format = Format { charset: Charset::Alnum, length: 20 };
 
     fn mem() -> [Block; 8] {
@@ -547,7 +597,10 @@ mod tests {
         let mut v = Vault::new();
         let mut b = MemBackup::default();
         v.init(&mut b, b"host randomness, at least 32 bytes of it!").unwrap();
-        v.store(&mut b, &C, &mut mem(), 0, &[100, 64, 116], &seed(1), &F, [1; 16], b"").unwrap();
+        // First slot goes into an empty vault: allowed without a PIN.
+        v.store(&mut b, &C, &mut mem(), 0, &[100, 64, 116], &seed(1), &F, [1; 16], b"", 0).unwrap();
+        // From now on slot changes need a recent correct PIN.
+        unlocked(v.attempt(&mut b, &C, &mut mem(), &[100, 64, 116], 0));
         v.store(
             &mut b,
             &C,
@@ -558,6 +611,7 @@ mod tests {
             &Format { charset: Charset::Hex, length: 64 },
             [2; 16],
             b"",
+            0,
         )
         .unwrap();
         (v, b)
@@ -617,7 +671,7 @@ mod tests {
         assert!(!v.is_live(&b));
         assert!(b.0.iter().all(|&w| w == 0));
         assert!(matches!(v.attempt(&mut b, &C, &mut mem(), &[5, 5], 10_000), Attempt::Wiped));
-        assert_eq!(v.clear_slot(&mut b, 0, b""), Err(Error::Dead));
+        assert_eq!(v.clear_slot(&mut b, 0, b"", 0), Err(Error::Dead));
     }
 
     #[test]
@@ -694,16 +748,16 @@ mod tests {
     fn store_rules() {
         let (mut v, mut b) = setup();
         let s = seed(9);
-        assert_eq!(v.store(&mut b, &C, &mut mem(), SLOTS, &[1], &s, &F, [0; 16], b""), Err(Error::BadSlot));
-        assert_eq!(v.store(&mut b, &C, &mut mem(), 1, &[], &s, &F, [0; 16], b""), Err(Error::BadPin));
-        assert_eq!(v.store(&mut b, &C, &mut mem(), 1, &[5, 5], &s, &F, [9; 16], b""), Err(Error::PinInUse));
+        assert_eq!(v.store(&mut b, &C, &mut mem(), SLOTS, &[1], &s, &F, [0; 16], b"", 0), Err(Error::BadSlot));
+        assert_eq!(v.store(&mut b, &C, &mut mem(), 1, &[], &s, &F, [0; 16], b"", 0), Err(Error::BadPin));
+        assert_eq!(v.store(&mut b, &C, &mut mem(), 1, &[5, 5], &s, &F, [9; 16], b"", 0), Err(Error::PinInUse));
         let bad = Format { charset: Charset::Hex, length: 0 };
-        assert_eq!(v.store(&mut b, &C, &mut mem(), 1, &[7], &s, &bad, [9; 16], b""), Err(Error::BadFormat));
+        assert_eq!(v.store(&mut b, &C, &mut mem(), 1, &[7], &s, &bad, [9; 16], b"", 0), Err(Error::BadFormat));
         // Re-keying a slot with its own PIN is fine, length prefix keeps [5,5,0] apart.
-        v.store(&mut b, &C, &mut mem(), 3, &[5, 5], &seed(7), &F, [9; 16], b"").unwrap();
-        v.store(&mut b, &C, &mut mem(), 1, &[5, 5, 0], &s, &F, [9; 16], b"").unwrap();
+        v.store(&mut b, &C, &mut mem(), 3, &[5, 5], &seed(7), &F, [9; 16], b"", 0).unwrap();
+        v.store(&mut b, &C, &mut mem(), 1, &[5, 5, 0], &s, &F, [9; 16], b"", 0).unwrap();
         assert_eq!(v.status(&b).unwrap().used, [true, true, false, true, false, false, false, false]);
-        v.clear_slot(&mut b, 3, b"").unwrap();
+        v.clear_slot(&mut b, 3, b"", 0).unwrap();
         assert!(matches!(v.attempt(&mut b, &C, &mut mem(), &[5, 5], 0), Attempt::Wrong { .. }));
     }
 
@@ -714,7 +768,7 @@ mod tests {
         let mut b = MemBackup::default();
         v.init(&mut b, &[7; 32]).unwrap();
         let f = Format { charset: Charset::Hex, length: 64 };
-        v.store(&mut b, &C, &mut mem(), 3, &[5, 5], &seed(2), &f, [2; 16], b"").unwrap();
+        v.store(&mut b, &C, &mut mem(), 3, &[5, 5], &seed(2), &f, [2; 16], b"", 0).unwrap();
         let mut inner = blank();
         assert!(v.open_into(&b, &mut inner));
         let hex: String = slot_rec(&inner, 3)[S_CT..].iter().map(|b| format!("{b:02x}")).collect();
@@ -734,12 +788,49 @@ mod tests {
     }
 
     #[test]
+    fn slot_changes_need_recent_unlock() {
+        let (mut v, mut b) = setup();
+        let late = C.admin_window_ms + 1;
+        let s = seed(9);
+        assert_eq!(v.store(&mut b, &C, &mut mem(), 1, &[7], &s, &F, [9; 16], b"", late), Err(Error::Locked));
+        assert_eq!(v.clear_slot(&mut b, 0, b"", late), Err(Error::Locked));
+        unlocked(v.attempt(&mut b, &C, &mut mem(), &[5, 5], late));
+        v.store(&mut b, &C, &mut mem(), 1, &[7], &s, &F, [9; 16], b"", late).unwrap();
+        // A wrong PIN slams the window shut.
+        assert!(matches!(v.attempt(&mut b, &C, &mut mem(), &[1], late), Attempt::Wrong { .. }));
+        assert_eq!(v.clear_slot(&mut b, 1, b"", late), Err(Error::Locked));
+    }
+
+    #[test]
+    fn reset_closes_admin_window() {
+        let (mut v, mut b) = setup();
+        assert!(v.on_boot(&mut b, &C, 0));
+        assert_eq!(v.clear_slot(&mut b, 0, b"", 0), Err(Error::Locked));
+    }
+
+    #[test]
+    fn store_is_not_a_pin_oracle() {
+        // Regression for SW-01: probing PINs through store() used to reveal the
+        // valid one via PinInUse, uncounted. Without a recent unlock every probe
+        // is refused before any PIN is looked at.
+        let (mut v, mut b) = setup();
+        let late = C.admin_window_ms + 1;
+        for guess in 0..20u16 {
+            let r = v.store(&mut b, &C, &mut mem(), 7, &[guess], &seed(0), &F, [2; 16], b"", late);
+            assert_eq!(r, Err(Error::Locked));
+        }
+        let r = v.store(&mut b, &C, &mut mem(), 7, &[5, 5], &seed(0), &F, [2; 16], b"", late);
+        assert_eq!(r, Err(Error::Locked), "the real PIN looks exactly like a wrong one");
+        assert_eq!(v.status(&b).unwrap().failures, 0);
+    }
+
+    #[test]
     fn uninitialised_is_dead() {
         let mut v = Vault::new();
         let mut b = MemBackup::default();
         assert!(!v.on_boot(&mut b, &C, 0));
         let s = seed(1);
-        assert_eq!(v.store(&mut b, &C, &mut mem(), 0, &[1], &s, &F, [0; 16], b""), Err(Error::Dead));
+        assert_eq!(v.store(&mut b, &C, &mut mem(), 0, &[1], &s, &F, [0; 16], b"", 0), Err(Error::Dead));
         assert!(matches!(v.attempt(&mut b, &C, &mut mem(), &[1], 0), Attempt::Wiped));
     }
 }

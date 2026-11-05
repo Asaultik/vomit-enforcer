@@ -68,6 +68,11 @@ output       k_out = HKDF-SHA256(seed, "vomit-enforcer/v1/<purpose>")
   that disagrees with its check word.
 * Every attempt runs Argon2id against every used slot, so timing doesn't reveal
   which one matched.
+* **Changing slots needs a recent correct PIN.** `store` / `clear_slot` work
+  on an empty vault, or within `admin_window_ms` (default 60 s) of a correct
+  PIN. Otherwise they return `Locked` before looking at any PIN, so they can't
+  be used to probe PINs or to overwrite slots. A wrong PIN or a reset closes the
+  window.
 * Known-answer tests pin every derivation against
   [`tools/kat.py`](tools/kat.py), which uses Python's `cryptography` package
   as an independent implementation.
@@ -80,7 +85,7 @@ let mut argon_mem = [Block::default(); 64];   // 64 KiB Argon2 scratch
 
 vault.on_boot(&mut bkp, &CFG, now_ms);                 // after every reset
 vault.init(&mut bkp, &host_random_32_bytes)?;          // factory reset
-vault.store(&mut bkp, &CFG, &mut argon_mem, slot, &pin, &seed, &format, salt, &noise)?;
+vault.store(&mut bkp, &CFG, &mut argon_mem, slot, &pin, &seed, &format, salt, &noise, now_ms)?;
 match vault.attempt(&mut bkp, &CFG, &mut argon_mem, &pin, now_ms) {
     Attempt::Unlocked { slot, seed, format } => render(&seed, &format),
     Attempt::Wrong { attempts_left, retry_in_ms } => ...,
@@ -94,10 +99,10 @@ vault.wipe(&mut bkp);                         // tamper / brownout interrupt
 
 ## Open decisions
 
-1. **Host access:** may anyone with the cable `STORE` / `RESET`, or only in a
-   setup mode entered on the dial?
-2. **Overwriting a used slot:** currently allowed without that slot's PIN.
-   Require it?
+1. ~~Host access / overwriting slots~~: decided. Slot changes need a recent
+   correct PIN (admin window). `RESET` stays open to anyone: it only destroys,
+   and breaking the tamper loop does the same.
+2. ~~(merged into 1)~~
 3. **Duress PIN:** none for now.
 4. **Confirm before typing** (`SEnd?` + tap): planned yes.
 5. **Per-slot output format:** implemented (charset + length per slot).
