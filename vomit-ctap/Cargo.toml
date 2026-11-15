@@ -1,0 +1,17 @@
+[package]
+name = "vomit-ctap"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "A small CTAP2 (FIDO2) authenticator on top of vomit-core: PIN protocol 1, ES256 credentials, hmac-secret."
+
+[dependencies]
+vomit-core = { path = "../vomit-core" }
+vomit-link = { path = "../vomit-link" }
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "ecdh"] }
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+aes = { version = "0.8", default-features = false, features = ["zeroize"] }
+chacha20 = { version = "0.9", features = ["zeroize"] }
+subtle = { version = "2.6", default-features = false }
+zeroize = { version = "1.8", default-features = false }

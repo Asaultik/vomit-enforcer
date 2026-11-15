@@ -1,0 +1,7 @@
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.thumbv6m-none-eabi]
+# Hold BOOT while plugging the board in, then `cargo run --release`.
+runner = "picotool load -u -v -x -t elf"
+rustflags = ["-C", "link-arg=--nmagic", "-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tlink-rp.x"]

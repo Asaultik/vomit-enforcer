@@ -1,0 +1,7 @@
+# Everything that runs on a PC: the hardware-independent logic and the simulator.
+# `cargo test` here tests all of it. The firmware crates have their own targets
+# and are built from their own directories.
+[workspace]
+resolver = "2"
+members = ["vomit-core", "vomit-link", "vomit-ctap", "sim"]
+exclude = ["bench", "fw-core", "fw-bridge"]
