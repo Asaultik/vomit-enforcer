@@ -1,0 +1,8 @@
+[package]
+name = "vomit-link"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "The path between the USB host and the vomit-enforcer core: CTAPHID on the bridge, and the UART framing between bridge and core."
+
+[dependencies]

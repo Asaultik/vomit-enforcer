@@ -1,0 +1,12 @@
+[package]
+name = "vomit-sim"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Runs the bridge and core logic on a PC, joined by an in-memory UART, and offers the USB side as 64-byte packets on a Unix socket. For testing against real FIDO clients."
+publish = false
+
+[dependencies]
+vomit-core = { path = "../vomit-core" }
+vomit-link = { path = "../vomit-link" }
+vomit-ctap = { path = "../vomit-ctap" }
