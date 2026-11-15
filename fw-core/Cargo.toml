@@ -1,0 +1,32 @@
+[package]
+name = "fw-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "vomit-enforcer core firmware for the STM32F411 Black Pill: holds the vault, answers FIDO2 requests arriving over UART from the bridge."
+publish = false
+
+[dependencies]
+vomit-core = { path = "../vomit-core" }
+vomit-ctap = { path = "../vomit-ctap" }
+vomit-link = { path = "../vomit-link" }
+
+embassy-stm32 = { version = "0.6", features = ["stm32f411ce", "time-driver-tim2", "memory-x", "unstable-pac", "defmt"] }
+embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
+embedded-io = "0.7"
+embedded-hal-nb = "1"
+cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7"
+sha2 = { version = "0.10", default-features = false }
+defmt = "1"
+defmt-rtt = "1"
+panic-probe = { version = "1", features = ["print-defmt"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = 2
+
+[profile.dev]
+opt-level = 3

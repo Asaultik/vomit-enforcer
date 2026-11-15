@@ -43,6 +43,7 @@ pub struct Bridge {
     cancel: Option<u8>,
     last_byte_ms: u64,
     wink: bool,
+    core_failed: bool,
 }
 
 impl Bridge {
@@ -57,6 +58,7 @@ impl Bridge {
             cancel: None,
             last_byte_ms: 0,
             wink: false,
+            core_failed: false,
         }
     }
 
@@ -132,6 +134,7 @@ impl Bridge {
         if age > CORE_TIMEOUT_MS || (!w.acked && age > ACK_TIMEOUT_MS) {
             self.cancel = Some(w.id);
             self.wait = None;
+            self.core_failed = true;
             self.hid.complete(&[ERR_OTHER]);
         } else if now_ms.saturating_sub(w.last_keepalive_ms) >= KEEPALIVE_MS {
             w.last_keepalive_ms = now_ms;
@@ -161,6 +164,11 @@ impl Bridge {
     /// True once per WINK from the host: blink something.
     pub fn take_wink(&mut self) -> bool {
         core::mem::take(&mut self.wink)
+    }
+
+    /// True once each time the core failed to answer (for a status light).
+    pub fn take_core_failed(&mut self) -> bool {
+        core::mem::take(&mut self.core_failed)
     }
 
     /// True while a request is with the core (for a status light).
@@ -254,6 +262,7 @@ mod tests {
         // Keepalives may come first; the last packet is the error reply.
         assert_eq!(&out.last().unwrap()[4..8], &[0x80 | cmd::CBOR, 0, 1, ERR_OTHER]);
         assert!(!b.busy());
+        assert!(b.take_core_failed() && !b.take_core_failed());
         assert_eq!(decode(&uart(&mut b)), (Kind::Cancel, id, vec![]));
     }
 

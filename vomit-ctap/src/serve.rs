@@ -24,6 +24,16 @@ pub const ROTATE_MS: u64 = 5 * 60_000;
 /// A frame with a gap this long in the middle is dropped.
 pub const LINK_GAP_MS: u64 = 100;
 
+/// Things worth a log line while bringing hardware up. Never secrets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trace {
+    /// A request arrived: its CTAP2 command byte and length.
+    Request(u8, usize),
+    /// The reply went out: its status byte and length.
+    Response(u8, usize),
+    WaitingForTouch,
+}
+
 /// The hardware, as the core's main loop sees it.
 pub trait CoreIo {
     /// A clock that only goes forward.
@@ -43,6 +53,8 @@ pub trait CoreIo {
     fn indicate(&mut self, _waiting_for_touch: bool) {}
     /// Nothing to do: sleep until the next interrupt, a millisecond at most.
     fn idle(&mut self) {}
+    /// For a debug log. The default discards it.
+    fn trace(&mut self, _event: Trace) {}
 }
 
 pub struct Server<'a, B: BackupStore, IO: CoreIo> {
@@ -100,10 +112,12 @@ impl<'a, B: BackupStore, IO: CoreIo> Server<'a, B, IO> {
                 Host { io: &mut self.io, drbg: &mut *self.drbg, id: request.id, up_timeout_ms: self.up_timeout_ms };
             // The first status doubles as "request received".
             host.status(STATUS_PROCESSING);
+            host.io.trace(Trace::Request(request.payload.first().copied().unwrap_or(0), request.payload.len()));
             let n = self.auth.handle(&mut host, memory, request.payload, &mut self.response);
             if let Some(reply) = frame::encode(Kind::Response, request.id, &self.response[..n], &mut self.frame) {
                 self.io.write(reply);
             }
+            self.io.trace(Trace::Response(self.response[0], n));
         }
 
         let now = self.io.now_ms();
@@ -195,6 +209,7 @@ impl<IO: CoreIo> Platform for Host<'_, IO> {
 
     fn user_presence(&mut self) -> Presence {
         self.status(STATUS_UP_NEEDED);
+        self.io.trace(Trace::WaitingForTouch);
         self.io.indicate(true);
         let result = self.wait_for_touch();
         self.io.indicate(false);

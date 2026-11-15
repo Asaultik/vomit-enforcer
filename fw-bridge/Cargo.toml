@@ -1,0 +1,33 @@
+[package]
+name = "fw-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "vomit-enforcer bridge firmware for the RP2040-Zero: a FIDO HID device on USB, frames to the core on UART. Holds no secrets."
+publish = false
+
+[dependencies]
+vomit-link = { path = "../vomit-link" }
+
+# The generic boot stage works with any flash chip, which matters on clone boards.
+embassy-rp = { version = "0.10", features = ["rp2040", "time-driver", "critical-section-impl", "boot2-generic-03h"] }
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }
+embassy-time = "0.5"
+embassy-usb = "0.6"
+embassy-futures = "0.1"
+embedded-io-async = "0.7"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+static_cell = "2"
+# The RP2040's core has no atomic compare-and-swap; this supplies one.
+portable-atomic = { version = "1", features = ["critical-section"] }
+smart-leds = "0.4"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = 2
+
+[profile.dev]
+opt-level = 1
