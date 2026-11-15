@@ -33,7 +33,6 @@ use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::usart::{self, BufferedUart, BufferedUartRx, BufferedUartTx};
 use embassy_stm32::{bind_interrupts, pac, peripherals, rcc, Peri};
 use embassy_time::Instant;
-use embedded_io::Write;
 use sha2::{Digest, Sha256};
 use {defmt_rtt as _, panic_probe as _};
 
@@ -68,7 +67,7 @@ static mut DRBG: MaybeUninit<Drbg> = MaybeUninit::uninit();
 #[link_section = ".uninit.ARGON"]
 static mut ARGON: MaybeUninit<[Block; ARGON_BLOCKS]> = MaybeUninit::uninit();
 
-static mut UART_TX: [u8; 256] = [0; 256];
+static mut UART_TX: [u8; 16] = [0; 16]; // the HAL wants one; see `Io::write`
 static mut UART_RX: [u8; 512] = [0; 512];
 
 bind_interrupts!(struct Irqs {
@@ -90,7 +89,8 @@ impl BackupStore for RtcBackup {
 
 struct Io {
     rx: BufferedUartRx<'static>,
-    tx: BufferedUartTx<'static>,
+    /// Unused, but dropping it would switch the transmitter off.
+    _tx: BufferedUartTx<'static>,
     button: Input<'static>,
     led: Output<'static>,
 }
@@ -107,8 +107,15 @@ impl CoreIo for Io {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        let _ = self.tx.write_all(bytes);
-        let _ = self.tx.flush();
+        // Straight to the transmitter, one byte at a time, waiting for room
+        // by polling. The HAL's interrupt-driven transmit can stall until
+        // the next received byte, which held a reply back for 40 seconds.
+        // A full reply takes about 110 ms at this speed.
+        let uart = pac::USART1;
+        for &byte in bytes {
+            while !uart.sr().read().txe() {}
+            uart.dr().write(|w| w.set_dr(byte as u16));
+        }
     }
 
     fn button_down(&mut self) -> bool {
@@ -248,7 +255,7 @@ fn main() -> ! {
     let (tx, rx) = uart.split();
 
     led.set_high();
-    let io = Io { rx, tx, button, led };
+    let io = Io { rx, _tx: tx, button, led };
     let mut server = Server::new(vault, RtcBackup, CFG, io, drbg);
     defmt::info!("vomit-enforcer core up. PIN set: {=bool}", server.authenticator().pin_is_set());
 

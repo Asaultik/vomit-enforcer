@@ -100,8 +100,8 @@ async fn main(spawner: Spawner) {
     static HID_STATE: StaticCell<hid::State> = StaticCell::new();
 
     let mut usb_config = embassy_usb::Config::new(USB_VID, USB_PID);
-    usb_config.manufacturer = Some("vomit-enforcer");
-    usb_config.product = Some("vomit-enforcer");
+    usb_config.manufacturer = Some("Gibberish Inc.");
+    usb_config.product = Some("Vomit Enforcer");
     usb_config.max_power = 100;
     let mut builder = embassy_usb::Builder::new(
         Driver::new(p.USB, Irqs),
