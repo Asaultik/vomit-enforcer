@@ -262,6 +262,23 @@ These are understood and not yet dealt with.
 3. **Uploading your own seed** instead of a device-generated one.
 4. **Cold-boot threshold** for the thermal sensor: needs measuring.
 
+## To do: the host may be tampered with (important)
+
+The device cannot tell whether the machine it unlocks has been tampered with.
+Planned, not designed in detail yet:
+
+* **Disk unlock: TPM quote attestation.** The device sends a nonce; the
+  initrd returns a TPM2 quote over PCR 7 (maybe 4 and 11) signed by an
+  attestation key enrolled earlier; the core verifies the P-256 signature,
+  nonce and PCR values before releasing the secret. Proves the boot chain,
+  not that nothing got in after boot. Needs a host-side helper and a way to
+  carry it over FIDO2 (or beside it).
+* **Signing: trusted display and confirm on the device**, so the host cannot
+  show one thing and sign another.
+* **Login:** FIDO2 origin binding already covers it.
+* **A policy per secret** (attestation + touch, touch only, ...), decided
+  early because it shapes the slot format.
+
 ## License
 
 GPL-3.0
