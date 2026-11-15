@@ -602,9 +602,8 @@ impl<'v, B: BackupStore> Authenticator<'v, B> {
         }
         out[..n].copy_from_slice(input.salt_enc);
         crypto::cbc_decrypt(&shared, &mut out[..n]);
-        for salt in out[..n].chunks_exact_mut(32) {
-            let output = crypto::hmac_sha256(&credential.cred_random[..], &[&*salt]);
-            salt.copy_from_slice(&output);
+        for salt in out[..n].as_chunks_mut::<32>().0 {
+            *salt = crypto::hmac_sha256(&credential.cred_random[..], &[&salt[..]]);
         }
         crypto::cbc_encrypt(&shared, &mut out[..n]);
         Ok(n)

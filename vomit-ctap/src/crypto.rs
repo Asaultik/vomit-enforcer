@@ -48,21 +48,20 @@ pub fn verify16(key: &[u8], parts: &[&[u8]], tag: &[u8]) -> bool {
 pub fn cbc_encrypt(key: &[u8; 32], data: &mut [u8]) {
     let cipher = Aes256::new(GenericArray::from_slice(key));
     let mut prev = [0u8; 16];
-    for block in data.chunks_exact_mut(16) {
+    for block in data.as_chunks_mut::<16>().0 {
         for (b, p) in block.iter_mut().zip(prev) {
             *b ^= p;
         }
         cipher.encrypt_block(GenericArray::from_mut_slice(block));
-        prev.copy_from_slice(block);
+        prev = *block;
     }
 }
 
 pub fn cbc_decrypt(key: &[u8; 32], data: &mut [u8]) {
     let cipher = Aes256::new(GenericArray::from_slice(key));
     let mut prev = [0u8; 16];
-    for block in data.chunks_exact_mut(16) {
-        let mut ciphertext = [0u8; 16];
-        ciphertext.copy_from_slice(block);
+    for block in data.as_chunks_mut::<16>().0 {
+        let ciphertext = *block;
         cipher.decrypt_block(GenericArray::from_mut_slice(block));
         for (b, p) in block.iter_mut().zip(prev) {
             *b ^= p;
@@ -100,7 +99,7 @@ fn sign(secret: &[u8; 32], parts: &[&[u8]]) -> Option<[u8; 64]> {
 /// `SEQUENCE { INTEGER r, INTEGER s }` from the fixed-width `r || s`.
 fn der_signature(rs: &[u8; 64], out: &mut [u8; MAX_SIG]) -> usize {
     let mut n = 2;
-    for half in rs.chunks_exact(32) {
+    for half in rs.as_chunks::<32>().0 {
         // DER integers are minimal and signed: drop leading zeros, then put
         // one back if the top bit would make the number look negative.
         let skip = half.iter().take(31).take_while(|&&b| b == 0).count();
