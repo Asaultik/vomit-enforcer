@@ -446,7 +446,7 @@ impl<'v, B: BackupStore> Authenticator<'v, B> {
                 _ => r.skip()?,
             }
         }
-        let client_data_hash = client_data_hash.ok_or(MISSING_PARAMETER)?;
+        let client_data_hash = hash32(client_data_hash)?;
         let rp_id = rp_id.ok_or(MISSING_PARAMETER)?;
         if !user {
             return Err(MISSING_PARAMETER);
@@ -473,7 +473,8 @@ impl<'v, B: BackupStore> Authenticator<'v, B> {
         }
         presence(p)?;
 
-        let credential = cred::create(&seed, &rp_id_hash, &mut |out| p.random(out));
+        let device_key = self.vault.device_key(&self.bkp).ok_or(OTHER)?;
+        let credential = cred::create(&seed, &device_key, &rp_id_hash, &mut |out| p.random(out));
         let (x, y) = credential.public();
 
         // rpIdHash | flags | signCount | aaguid | idLen | id | public key | extensions
@@ -532,13 +533,22 @@ impl<'v, B: BackupStore> Authenticator<'v, B> {
             }
         }
         let rp_id = rp_id.ok_or(MISSING_PARAMETER)?;
-        let client_data_hash = client_data_hash.ok_or(MISSING_PARAMETER)?;
+        let client_data_hash = hash32(client_data_hash)?;
         if opts.uv == Some(true) {
             return Err(UNSUPPORTED_OPTION);
         }
+        // "up": false asks for an answer without a touch. That is never
+        // enough for the secret a disk key is made from.
+        let up = opts.up != Some(false);
+        if !up && hmac_secret.is_some() {
+            return Err(UNSUPPORTED_OPTION);
+        }
+        let rp_id_hash = crypto::sha256(&[rp_id]);
+        if !up && pin_auth.is_none() {
+            return self.probe(&rp_id_hash, allow, out);
+        }
 
         let seed = self.authorize(p, pin_auth, pin_protocol, client_data_hash)?;
-        let rp_id_hash = crypto::sha256(&[rp_id]);
         // Nothing is stored here, so without a list of credential IDs to
         // check there is nothing to find.
         let credential = match allow {
@@ -547,8 +557,6 @@ impl<'v, B: BackupStore> Authenticator<'v, B> {
         }
         .ok_or(NO_CREDENTIALS)?;
 
-        // "up": false is a silent check that a credential is ours.
-        let up = opts.up != Some(false);
         if up {
             presence(p)?;
         }
@@ -587,6 +595,39 @@ impl<'v, B: BackupStore> Authenticator<'v, B> {
         w.finish()
     }
 
+    /// "Is one of these credentials yours?", asked with no PIN and no touch.
+    /// Programs ask this first to pick the right device (`systemd-cryptsetup`
+    /// gives up if it gets no answer), so it is answered while locked, from
+    /// the device tag alone.
+    ///
+    /// The reply names the credential and proves nothing: its flags say
+    /// "user neither present nor verified" and its signature is empty,
+    /// because the credential's key is locked away with the seed.
+    fn probe(&self, rp_id_hash: &[u8; 32], allow: Option<&[u8]>, out: &mut [u8]) -> Result<usize> {
+        let device_key = self.vault.device_key(&self.bkp).ok_or(NO_CREDENTIALS)?;
+        let id = match allow {
+            Some(list) => first_credential(list, |id| cred::recognise(&device_key, rp_id_hash, id).then_some(id))?,
+            None => None,
+        }
+        .ok_or(NO_CREDENTIALS)?;
+
+        let mut auth_data = [0u8; 37]; // rpIdHash | flags | signCount
+        auth_data[..32].copy_from_slice(rp_id_hash);
+        let mut w = Writer::new(out);
+        w.map(3);
+        w.uint(1);
+        w.map(2);
+        w.text("id");
+        w.bytes(id);
+        w.text("type");
+        w.text("public-key");
+        w.uint(2);
+        w.bytes(&auth_data);
+        w.uint(3);
+        w.bytes(&[]);
+        w.finish()
+    }
+
     /// The hmac-secret extension: `HMAC-SHA256(cred_random, salt)` for one or
     /// two 32-byte salts, with salts and outputs encrypted under the PIN
     /// protocol's shared secret. This is the value a disk-unlock key is made
@@ -608,6 +649,11 @@ impl<'v, B: BackupStore> Authenticator<'v, B> {
         crypto::cbc_encrypt(&shared, &mut out[..n]);
         Ok(n)
     }
+}
+
+/// A client data hash is a SHA-256.
+fn hash32(hash: Option<&[u8]>) -> Result<&[u8]> {
+    hash.ok_or(MISSING_PARAMETER).and_then(|h| if h.len() == 32 { Ok(h) } else { Err(INVALID_LENGTH) })
 }
 
 fn presence(p: &mut impl Platform) -> Result<()> {
@@ -741,6 +787,12 @@ fn hmac_secret_input<'a>(r: &mut Reader<'a>) -> Result<Option<HmacSecretInput<'a
 /// The first credential in a list of descriptors that is ours for this
 /// relying party.
 fn find_credential(seed: &Seed, rp_id_hash: &[u8; 32], list: &[u8]) -> Result<Option<Credential>> {
+    first_credential(list, |id| cred::open(seed, rp_id_hash, id))
+}
+
+/// Walk a list of credential descriptors and return the first ID that
+/// `accept` takes.
+fn first_credential<'a, T>(list: &'a [u8], mut accept: impl FnMut(&'a [u8]) -> Option<T>) -> Result<Option<T>> {
     let mut r = Reader::new(list);
     for _ in 0..r.array()? {
         let mut id = None;
@@ -751,8 +803,8 @@ fn find_credential(seed: &Seed, rp_id_hash: &[u8; 32], list: &[u8]) -> Result<Op
                 r.skip()?;
             }
         }
-        if let Some(credential) = id.and_then(|id| cred::open(seed, rp_id_hash, id)) {
-            return Ok(Some(credential));
+        if let Some(found) = id.and_then(&mut accept) {
+            return Ok(Some(found));
         }
     }
     Ok(None)

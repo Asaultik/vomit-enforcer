@@ -19,7 +19,7 @@ reach (BIOS prompts, GRUB).
 | --- | --- |
 | Vault and key derivation (`vomit-core`) | Tested on a PC. Ran on a real F411 in the bench firmware. |
 | FIDO2 logic (`vomit-link`, `vomit-ctap`) | Tested on a PC, including against python-fido2 and libfido2. |
-| Firmware (`fw-core`, `fw-bridge`) | Compiles. **Has not run on hardware yet.** |
+| Firmware (`fw-core`, `fw-bridge`) | Runs on the boards: device info and setting a PIN work over USB. Enrolling a disk has not succeeded on hardware yet (one fix for it is untested there). |
 | Tamper input, readout protection, enclosure | Not started. |
 | PIN on the device itself (dial) | Not started. For now the host asks for the PIN, as with any FIDO2 key. |
 
@@ -73,9 +73,15 @@ tested without a board.
   vault slot that the PIN unlocks, and that seed is only held in RAM for 60
   seconds after a correct PIN. The device says so up front (`alwaysUv`).
 * **Nothing is stored per credential.** A credential ID is a random nonce plus
-  a tag; the private key is re-derived from the seed, the site and the nonce
+  two tags; the private key is re-derived from the seed, the site and the nonce
   ([`cred.rs`](vomit-ctap/src/cred.rs)). So there are no "resident" keys, and
   wiping the seed kills every credential at once.
+* **While locked it answers one question:** "is this credential ID yours?",
+  yes or no, with no signature. `systemd-cryptsetup` asks this before it asks
+  for the PIN and gives up without an answer. The answer comes from a device
+  key that is unrelated to the seeds, so it does not say which PIN a
+  credential belongs to. Anyone with the cable can ask.
+* **The disk secret (`hmac-secret`) always needs a touch,** even with the PIN.
 * Wrong PINs go through the vault: counted before they are checked, a growing
   lockout after each, and a full wipe after eight in a row.
 * A touch means the KEY button on the core board. A button already held down
@@ -180,6 +186,14 @@ sudo /usr/lib/systemd/systemd-cryptsetup detach vomit-test
 If a step fails, the core's log shows the last command and the status it
 answered with. That, and the exact error on the PC, is what to look at.
 
+Things met while bringing it up:
+
+* `probe-rs` cannot connect ("JtagNoDeviceConnected") while the core sleeps
+  between requests. Hold BOOT0, tap NRST, release BOOT0, then flash.
+* A reset keeps the PIN. Unplugging does not: set it again with
+  `fido2-token -S`, and enrol again.
+* "Interface busy" on the ST-Link means another program has it open.
+
 ### The bridge's light
 
 | Colour | Meaning |
@@ -250,9 +264,9 @@ These are understood and not yet dealt with.
   the middle of it.
 * **The PIN is typed on the host** for now, where a keylogger can see it.
   Entering it on the device is the plan.
-* **A silent probe without the PIN is answered with "PIN required".** Programs
-  that insist on probing without a PIN (OpenSSH, when several security keys
-  are plugged in at once) will not pick this device.
+* **Reset needs only a touch.** A host that asks for a reset while you expect
+  a login prompt gets your touch and wipes the device. The light looks the
+  same for both.
 
 ## Open decisions
 

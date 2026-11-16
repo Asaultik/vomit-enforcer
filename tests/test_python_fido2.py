@@ -228,7 +228,7 @@ class Credentials(WithPin):
         self.assertEqual(ad.counter, 0)
         self.assertEqual(ad.extensions, {"hmac-secret": True})
         self.assertEqual(bytes(ad.credential_data.aaguid), b"vomit-enforcer\x00\x01")
-        self.assertEqual(len(ad.credential_data.credential_id), 48)
+        self.assertEqual(len(ad.credential_data.credential_id), 64)
         self.assertEqual(ad.credential_data.public_key[3], -7)
         # Self attestation: signed by the new credential's own key.
         self.assertEqual(set(att.att_stmt), {"alg", "sig"})
@@ -264,7 +264,7 @@ class Credentials(WithPin):
         self.assertNotEqual(ca.credential_id, cb.credential_id)
         self.assertNotEqual(ca.public_key, cb.public_key)
         expect_error(self, ERR.NO_CREDENTIALS, self.host.get, ca.credential_id, rp_id="evil.example")
-        expect_error(self, ERR.NO_CREDENTIALS, self.host.get, os.urandom(48))
+        expect_error(self, ERR.NO_CREDENTIALS, self.host.get, os.urandom(64))
         expect_error(self, ERR.NO_CREDENTIALS, self.host.get, b"short")
 
     def test_allow_list_with_strangers_finds_ours(self):
@@ -272,7 +272,7 @@ class Credentials(WithPin):
         cred = att.auth_data.credential_data
         cdh = os.urandom(32)
         token = self.host.pin.get_pin_token(PIN)
-        allow = [{"type": "public-key", "id": os.urandom(n)} for n in (16, 48, 64)]
+        allow = [{"type": "public-key", "id": os.urandom(n)} for n in (16, 48, 64, 80)]
         allow.insert(2, {"type": "public-key", "id": cred.credential_id})
         assertion = self.host.ctap.get_assertion(
             "example.com", cdh, allow_list=allow, pin_uv_param=self.host.protocol.authenticate(token, cdh), pin_uv_protocol=1
@@ -289,7 +289,7 @@ class Credentials(WithPin):
     def test_exclude_list(self):
         _, att = self.host.make()
         mine = {"type": "public-key", "id": att.auth_data.credential_data.credential_id}
-        other = {"type": "public-key", "id": os.urandom(48)}
+        other = {"type": "public-key", "id": os.urandom(64)}
         expect_error(self, ERR.CREDENTIAL_EXCLUDED, self.host.make, exclude=[other, mine])
         self.host.make(exclude=[other])
         # The same ID does not exclude anything for another site.
@@ -317,7 +317,7 @@ class Credentials(WithPin):
 
     def test_large_request_spanning_many_packets(self):
         user = {"id": os.urandom(64), "name": "n" * 64, "displayName": "d" * 64}
-        exclude = [{"type": "public-key", "id": os.urandom(48)} for _ in range(12)]
+        exclude = [{"type": "public-key", "id": os.urandom(64)} for _ in range(10)]
         cdh = os.urandom(32)
         token = self.host.pin.get_pin_token(PIN)
         att = self.host.ctap.make_credential(

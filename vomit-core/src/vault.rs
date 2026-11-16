@@ -11,7 +11,7 @@
 //!
 //! outer, whole vault  k_e  = master key for epoch e (backup registers)
 //!                     buf  = ChaCha20-Poly1305(k_e, nonce = 0, aad = "vomit-enforcer/v1/vault" || e,
-//!                                              seal_counter || 8 x slot record)
+//!                                              seal_counter || device_key || 8 x slot record)
 //! ```
 //!
 //! * Without the backup registers, SRAM is noise: not even the PIN tags can
@@ -47,7 +47,10 @@ pub const MIN_ENTROPY: usize = 32;
 const TAG_LEN: usize = 16;
 const PAYLOAD_LEN: usize = SEED_LEN + 2; // seed, charset, length
 const SLOT_LEN: usize = 1 + SALT_LEN + 4 + PAYLOAD_LEN + TAG_LEN;
-const HDR_LEN: usize = 4;
+const CTR_LEN: usize = 4;
+/// Length of [`Vault::device_key`].
+pub const DEVICE_KEY_LEN: usize = 32;
+const HDR_LEN: usize = CTR_LEN + DEVICE_KEY_LEN; // seal counter, device key
 const INNER_LEN: usize = HDR_LEN + SLOTS * SLOT_LEN;
 
 // Offsets inside one slot record.
@@ -61,6 +64,7 @@ const SLOT_AAD: &[u8] = b"vomit-enforcer/v1/slot";
 const VAULT_AAD: &[u8] = b"vomit-enforcer/v1/vault";
 const MASTER_INIT: &[u8] = b"vomit-enforcer/v1/master-init";
 const MASTER_NEXT: &[u8] = b"vomit-enforcer/v1/master-next";
+const DEVICE_KEY: &[u8] = b"vomit-enforcer/v1/device-key";
 
 /// Fixed by the firmware, never stored in RAM where a glitch could change it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,6 +295,7 @@ impl Vault {
         backup::set_epoch(bkp, 0);
         backup::set_failures(bkp, 0);
         self.bufs[0] = [0; INNER_LEN];
+        self.bufs[0][CTR_LEN..HDR_LEN].copy_from_slice(&kdf::hkdf32(entropy, DEVICE_KEY)[..]);
         let tag = ChaCha20Poly1305::new(Key::from_slice(&k[..]))
             .encrypt_in_place_detached(&Nonce::default(), &vault_aad(0), &mut self.bufs[0])
             .expect("buffer within ChaCha20-Poly1305 limits");
@@ -361,6 +366,20 @@ impl Vault {
         })
     }
 
+    /// A key that is readable without any PIN for as long as the vault is
+    /// live: made at [`Vault::init`], gone at wipe, unrelated to every seed.
+    /// For things the device must be able to do while locked, such as
+    /// recognising its own credential IDs. It protects nothing by itself.
+    pub fn device_key(&self, bkp: &impl BackupStore) -> Option<Zeroizing<[u8; DEVICE_KEY_LEN]>> {
+        let mut inner = blank();
+        if !self.open_into(bkp, &mut inner) {
+            return None;
+        }
+        let mut key = Zeroizing::new([0u8; DEVICE_KEY_LEN]);
+        key.copy_from_slice(&inner[CTR_LEN..HDR_LEN]);
+        Some(key)
+    }
+
     // ---- slots -------------------------------------------------------------
 
     /// Changing slots needs a recent correct PIN, unless there is nothing to
@@ -419,8 +438,8 @@ impl Vault {
 
         // Fresh nonce counter for every seal, so even a reused salt+PIN never
         // repeats a (key, nonce) pair.
-        let ctr = u32::from_le_bytes(inner[..HDR_LEN].try_into().unwrap()).wrapping_add(1);
-        inner[..HDR_LEN].copy_from_slice(&ctr.to_le_bytes());
+        let ctr = u32::from_le_bytes(inner[..CTR_LEN].try_into().unwrap()).wrapping_add(1);
+        inner[..CTR_LEN].copy_from_slice(&ctr.to_le_bytes());
 
         let k = kdf::stretch_pin(pin, &salt, cfg.kdf, memory).map_err(|_| Error::Kdf)?;
         let rec = slot_rec_mut(&mut inner, slot);
@@ -622,6 +641,23 @@ mod tests {
             Attempt::Unlocked { slot, seed, format } => (slot, seed, format),
             a => panic!("{a:?}"),
         }
+    }
+
+    #[test]
+    fn device_key_lives_and_dies_with_the_vault() {
+        let (mut v, mut b) = setup();
+        let key = v.device_key(&b).unwrap();
+        assert_ne!(*key, [0; 32]);
+        // Unchanged by slot changes, wrong PINs and rotation.
+        assert!(matches!(v.attempt(&mut b, &C, &mut mem(), &[9], 0), Attempt::Wrong { .. }));
+        assert!(v.rotate(&mut b, b"noise"));
+        assert_eq!(*v.device_key(&b).unwrap(), *key);
+        v.wipe(&mut b);
+        assert!(v.device_key(&b).is_none());
+        // A new vault gets a new one.
+        v.init(&mut b, b"other randomness, also at least 32 bytes").unwrap();
+        assert_ne!(*v.device_key(&b).unwrap(), *key);
+        assert!(Vault::new().device_key(&MemBackup::default()).is_none());
     }
 
     #[test]

@@ -253,7 +253,7 @@ class Cryptenroll(WithDevice):
         # "Please enter security token PIN:"
         self.check(lib.fido_dev_make_cred(enroll.dev, c, self.PIN))
         cred_id = blob(lib.fido_cred_id_ptr(c), lib.fido_cred_id_len(c))
-        self.assertEqual(len(cred_id), 48)
+        self.assertEqual(len(cred_id), 64)
 
         a = self.new_assert(cred_id, salt)
         self.check(lib.fido_dev_get_assert(enroll.dev, a, self.PIN))
@@ -267,17 +267,21 @@ class Cryptenroll(WithDevice):
         extensions, options = boot.features()
         self.assertTrue(options["clientPin"], "systemd refuses PIN-enrolled volumes on a token with no PIN")
 
-        # Pre-flight: "is this credential on this token?", silently.
-        # With the PIN, we can say yes without asking for a touch...
+        # Pre-flight, fido2_is_cred_in_specific_token(): "is this credential
+        # on this token?", with no PIN and no touch. systemd gives up on
+        # anything but a yes or a no here.
+        probe = self.new_assert(cred_id, up=FALSE)
+        self.check(lib.fido_dev_get_assert(boot.dev, probe, None))
+        self.assertEqual(lib.fido_assert_flags(probe, 0) & 0x05, 0, "neither present nor verified")
+        stranger = self.new_assert(os.urandom(64), up=FALSE)
+        self.check(lib.fido_dev_get_assert(boot.dev, stranger, None), ERR_NO_CREDENTIALS)
+        # The same question with the PIN is answered with a real signature.
         probe = self.new_assert(cred_id, up=FALSE)
         self.check(lib.fido_dev_get_assert(boot.dev, probe, self.PIN))
         self.assertEqual(lib.fido_assert_flags(probe, 0) & 0x05, 0x04, "user verified, not present")
-        # ...and no for a credential that is not ours.
-        stranger = self.new_assert(os.urandom(48), up=FALSE)
-        self.check(lib.fido_dev_get_assert(boot.dev, stranger, self.PIN), ERR_NO_CREDENTIALS)
-        # Without the PIN we cannot tell, and say that a PIN is needed.
-        blind = self.new_assert(cred_id, up=FALSE)
-        self.check(lib.fido_dev_get_assert(boot.dev, blind, None), ERR_PIN_REQUIRED)
+        # Never the disk secret without a touch, PIN or not.
+        quiet = self.new_assert(cred_id, salt, up=FALSE)
+        self.check(lib.fido_dev_get_assert(boot.dev, quiet, self.PIN), ERR_UNSUPPORTED_OPTION)
 
         # The real thing.
         a = self.new_assert(cred_id, salt)

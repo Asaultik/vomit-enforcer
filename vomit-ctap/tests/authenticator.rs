@@ -185,7 +185,40 @@ impl<'v, 'b> Host<'v, 'b> {
         let mut r = Reader::new(&reply);
         assert_eq!((r.map(), r.uint(), r.text(), r.uint()), (Ok(3), Ok(1), Ok(&b"packed"[..]), Ok(2)));
         let auth_data = r.bytes().unwrap();
-        Ok(auth_data[55..55 + 48].to_vec())
+        Ok(auth_data[55..55 + 64].to_vec())
+    }
+
+    /// getAssertion the way a program asks "is this credential yours?":
+    /// no PIN, no touch. On success, the flags byte and the signature.
+    fn probe(&mut self, cred_id: &[u8]) -> Result<(u8, Vec<u8>), u8> {
+        let (status, reply) = self.call(0x02, |w| {
+            w.map(4);
+            w.uint(1);
+            w.text(RP);
+            w.uint(2);
+            w.bytes(&[9u8; 32]);
+            w.uint(3);
+            w.array(1);
+            w.map(2);
+            w.text("id");
+            w.bytes(cred_id);
+            w.text("type");
+            w.text("public-key");
+            w.uint(5);
+            w.map(1);
+            w.text("up");
+            w.bool(false);
+        });
+        if status != status::OK {
+            return Err(status);
+        }
+        let mut r = Reader::new(&reply);
+        assert_eq!((r.map(), r.uint()), (Ok(3), Ok(1)));
+        r.skip().unwrap();
+        assert_eq!(r.uint(), Ok(2));
+        let flags = r.bytes().unwrap()[32];
+        assert_eq!(r.uint(), Ok(3));
+        Ok((flags, r.bytes().unwrap().to_vec()))
     }
 
     fn assert(&mut self, token: &[u8; 32], cred_id: &[u8], up: bool) -> u8 {
@@ -361,6 +394,33 @@ fn rotation_does_not_disturb_anything() {
 }
 
 #[test]
+fn a_locked_device_recognises_its_credentials_and_no_more() {
+    let (mut vault, mut registers) = (Vault::new(), MemBackup::default());
+    let mut host = Host::boot(&mut vault, &mut registers, World::new());
+    assert_eq!(host.probe(&[0; 64]), Err(status::NO_CREDENTIALS), "an empty device has none");
+    assert_eq!(host.set_pin(PIN), status::OK);
+    let token = host.token(PIN).unwrap();
+    let cred = host.make(&token).unwrap();
+
+    // Let the session run out: locked again.
+    host.world.now += TOKEN_TTL_MS;
+    assert_eq!(host.assert(&token, &cred, true), status::PIN_AUTH_INVALID);
+    let touches = host.world.touches;
+    // "Yes, mine", with nothing proven: no flags, no signature.
+    assert_eq!(host.probe(&cred), Ok((0, vec![])));
+    let mut other = cred.clone();
+    other[0] ^= 1;
+    assert_eq!(host.probe(&other), Err(status::NO_CREDENTIALS));
+    assert_eq!(host.probe(&cred[..48]), Err(status::NO_CREDENTIALS));
+    assert_eq!(host.world.touches, touches, "and nobody is bothered");
+
+    // After a wipe it no longer knows them.
+    host.world.presence = Presence::Confirmed;
+    assert_eq!(host.raw(&[0x07]).0, status::OK);
+    assert_eq!(host.probe(&cred), Err(status::NO_CREDENTIALS));
+}
+
+#[test]
 fn touch_is_asked_for_exactly_when_it_should_be() {
     let (mut vault, mut registers) = (Vault::new(), MemBackup::default());
     let mut host = Host::boot(&mut vault, &mut registers, World::new());
@@ -374,7 +434,7 @@ fn touch_is_asked_for_exactly_when_it_should_be() {
     assert_eq!(host.assert(&token, &cred, true), status::OK);
     assert_eq!(host.world.touches, 2);
     // A credential that isn't ours is refused before anyone is bothered.
-    assert_eq!(host.assert(&token, &[0; 48], true), status::NO_CREDENTIALS);
+    assert_eq!(host.assert(&token, &[0; 64], true), status::NO_CREDENTIALS);
     assert_eq!(host.world.touches, 2);
 
     host.world.presence = Presence::Cancelled;
