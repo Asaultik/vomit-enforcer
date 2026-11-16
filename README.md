@@ -193,6 +193,10 @@ Things met while bringing it up:
 * A reset keeps the PIN. Unplugging does not: set it again with
   `fido2-token -S`, and enrol again.
 * "Interface busy" on the ST-Link means another program has it open.
+* After several wrong PINs the host may say the PIN is blocked and to
+  "remove and reinsert the token". **Don't: unplugging wipes it.** Wait
+  instead; the lockout is 1 s after the first wrong PIN and doubles each
+  time (the eighth wrong PIN in a row wipes).
 
 ### The bridge's light
 

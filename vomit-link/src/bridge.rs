@@ -149,16 +149,15 @@ impl Bridge {
 
     /// Bytes for the core, if any, copied into `out`. Returns how many.
     pub fn take_uart(&mut self, out: &mut [u8; MAX_FRAME]) -> usize {
-        if self.out_len > 0 {
-            let n = self.out_len;
-            out[..n].copy_from_slice(&self.out[..n]);
-            self.out_len = 0;
-            return n;
-        }
+        // A cancel is always for an older request than the one waiting to
+        // go out, and the core, while it waits for a touch, throws away
+        // everything but a cancel. So the cancel goes first.
         if let Some(id) = self.cancel.take() {
             return frame::encode(Kind::Cancel, id, &[], out).map_or(0, |f| f.len());
         }
-        0
+        let n = core::mem::take(&mut self.out_len);
+        out[..n].copy_from_slice(&self.out[..n]);
+        n
     }
 
     /// True once per WINK from the host: blink something.
@@ -264,6 +263,22 @@ mod tests {
         assert!(!b.busy());
         assert!(b.take_core_failed() && !b.take_core_failed());
         assert_eq!(decode(&uart(&mut b)), (Kind::Cancel, id, vec![]));
+    }
+
+    #[test]
+    fn a_cancel_goes_out_before_the_next_request() {
+        let mut b = Bridge::new();
+        send(&mut b, cmd::CBOR, &[0x02], 0);
+        let (_, old, _) = decode(&uart(&mut b));
+        // The core never answers; the host tries again before the UART is
+        // served.
+        b.tick(ACK_TIMEOUT_MS + 1);
+        send(&mut b, cmd::CBOR, &[0x04], ACK_TIMEOUT_MS + 2);
+        assert_eq!(decode(&uart(&mut b)), (Kind::Cancel, old, vec![]));
+        let (kind, new, payload) = decode(&uart(&mut b));
+        assert_eq!((kind, payload), (Kind::Request, vec![0x04]));
+        assert_ne!(new, old);
+        assert!(uart(&mut b).is_empty());
     }
 
     #[test]

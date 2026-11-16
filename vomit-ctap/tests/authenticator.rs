@@ -509,6 +509,25 @@ fn hostile_input_never_panics() {
     let n = w.finish().unwrap();
     buf[0] = 0x06;
     seeds.push(buf[..=n].to_vec());
+    // The PIN-less probe.
+    let mut w = Writer::new(&mut buf[1..]);
+    w.map(4);
+    w.uint(1);
+    w.text(RP);
+    w.uint(2);
+    w.bytes(&cdh);
+    w.uint(3);
+    w.array(1);
+    w.map(1);
+    w.text("id");
+    w.bytes(&cred);
+    w.uint(5);
+    w.map(1);
+    w.text("up");
+    w.bool(false);
+    let n = w.finish().unwrap();
+    buf[0] = 0x02;
+    seeds.push(buf[..=n].to_vec());
 
     for round in 0..6000 {
         let mut request = match round % 4 {
@@ -519,7 +538,7 @@ fn hostile_input_never_panics() {
                 r.insert(0, [1u8, 2, 4, 6, 7, 8, 0x55][(next() % 7) as usize]);
                 r
             }
-            _ => seeds[(next() % 3) as usize].clone(),
+            _ => seeds[(next() as usize) % seeds.len()].clone(),
         };
         match round % 4 {
             // A few flipped bytes.
