@@ -286,10 +286,15 @@ The device cannot tell whether the machine it unlocks has been tampered with.
 Planned, not designed in detail yet:
 
 * **Disk unlock: TPM quote attestation.** The device sends a nonce; the
-  initrd returns a TPM2 quote over PCR 7 (maybe 4 and 11) signed by an
-  attestation key enrolled earlier; the core verifies the P-256 signature,
-  nonce and PCR values before releasing the secret. Proves the boot chain,
-  not that nothing got in after boot. Needs a host-side helper and a way to
+  initrd returns a TPM2 quote over PCR 7 signed by an attestation key
+  enrolled earlier; the core verifies the P-256 signature, nonce and PCR
+  value before releasing the secret. PCR 7 only: with lanzaboote and your
+  own Secure Boot keys it stays the same across rebuilds and still means
+  "booted something you signed". PCRs 4 and 11 change on every rebuild,
+  which would mean re-enrolling each time. PCR 7 changes on a dbx update or
+  a key change; those need a re-enrol path. The nonce should also cover the
+  host's PIN-protocol key, so the attested host is the one that receives
+  the secret. Proves the boot chain, not that nothing got in after boot. Needs a host-side helper and a way to
   carry it over FIDO2 (or beside it).
 * **Signing: trusted display and confirm on the device**, so the host cannot
   show one thing and sign another.
